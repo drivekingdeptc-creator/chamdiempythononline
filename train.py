@@ -4,9 +4,9 @@ import streamlit as st
 from PIL import Image
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-st.set_page_config(page_title="VDC - HEPC Scanner V0.15", layout="wide")
-st.title("🚀 HEPC Click-Scanner V0.15")
-st.write("Giảng viên: **Trần Công Đẹp** | Tính năng: Tự động bẻ phẳng giấy & Khử nhiễu ánh sáng")
+st.set_page_config(page_title="VDC - HEPC Scanner V0.17", layout="wide")
+st.title("🚀 HEPC Click-Scanner V0.17")
+st.write("Giảng viên: **Trần Công Đẹp** | Tính năng: Tự động khóa khung giấy cỡ lớn (>70%)")
 
 # --- HÀM HỖ TRỢ BẺ PHẲNG ---
 def order_points(pts):
@@ -37,11 +37,13 @@ def four_point_transform(image, pts):
 if "diem_click" not in st.session_state:
     st.session_state.diem_click = []
 
-st.sidebar.header("⚙️ CẤU HÌNH ĐÁP ÁN")
+st.sidebar.header("⚙️ CẤU HÌNH HỆ THỐNG")
 input_dap_an = st.sidebar.text_area("Nhập dãy đáp án chuẩn:", value="ABCD")
 DAP_AN_LIST = list(input_dap_an.upper().replace(" ", ""))
 
-nguong_muc = st.sidebar.slider("Độ nhạy nét mực (Càng nhỏ càng dễ nhận)", 10, 100, 30)
+nguong_muc = st.sidebar.slider("Độ nhạy nét mực", 10, 100, 30)
+
+bat_cat_tu_dong = st.sidebar.checkbox("✂️ Bật tự động cắt mép giấy (Phiếu >70% ảnh)", value=True)
 
 if st.sidebar.button("🔄 Xóa tọa độ (Làm mới lưới)"):
     st.session_state.diem_click = []
@@ -50,40 +52,47 @@ if st.sidebar.button("🔄 Xóa tọa độ (Làm mới lưới)"):
 uploaded_file = st.sidebar.file_uploader("Tải phiếu làm bài lên...", type=["jpg", "png", "jpeg"])
 
 if uploaded_file:
-    # Đọc ảnh gốc
     img_pil = Image.open(uploaded_file).convert("RGB")
     img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    h_orig, w_orig = img_cv.shape[:2]
+    dien_tich_anh = h_orig * w_orig
     
-    # --- BƯỚC 0: TỰ ĐỘNG CẮT BỎ NỀN THỪA ---
-    gray_full = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray_full, (5, 5), 0)
-    edged = cv2.Canny(blurred, 50, 150)
+    img_xuly = img_cv.copy()
     
-    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    
-    paper_contour = None
-    for c in contours:
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4:
-            paper_contour = approx
-            break
-            
-    if paper_contour is not None:
-        img_xuly = four_point_transform(img_cv, paper_contour.reshape(4, 2))
-        st.toast("✂️ Đã tự động cắt gọt lề thừa và bẻ phẳng tờ giấy!", icon="✅")
-    else:
-        img_xuly = img_cv.copy()
-        st.toast("⚠️ Không tìm thấy viền giấy, hệ thống đang dùng ảnh gốc.", icon="⚠️")
+    # --- BƯỚC 0: CẮT VIỀN (ÁP DỤNG QUY LUẬT 70% CỦA ANH ĐẸP) ---
+    if bat_cat_tu_dong:
+        gray_full = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray_full, (5, 5), 0)
+        edged = cv2.Canny(blurred, 50, 150)
+        
+        contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        
+        paper_contour = None
+        for c in contours:
+            # SỬA LỖI THEO THỰC TẾ: Khung bắt buộc phải chiếm trên 60% diện tích tấm ảnh (chừa hao 10% cho anh Đẹp thao tác)
+            if cv2.contourArea(c) < (dien_tich_anh * 0.60):
+                continue
+                
+            peri = cv2.arcLength(c, True)
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+            if len(approx) == 4:
+                paper_contour = approx
+                break
+                
+        if paper_contour is not None:
+            img_xuly = four_point_transform(img_cv, paper_contour.reshape(4, 2))
+            st.toast("✂️ Đã tìm thấy viền giấy lớn và bẻ phẳng!", icon="✅")
+        else:
+            st.toast("⚠️ Tờ giấy không đủ to (chiếm < 60% ảnh). Đang giữ nguyên ảnh gốc.", icon="⚠️")
 
-    # Dùng ảnh đã cắt làm ảnh chính để xử lý
+    # Hiển thị ảnh (đã cắt hoặc giữ nguyên)
     img_hien_thi = img_xuly.copy()
     img_pil_xuly = Image.fromarray(cv2.cvtColor(img_xuly, cv2.COLOR_BGR2RGB))
     
-    # --- BƯỚC 1: LẤY 4 ĐIỂM TỌA ĐỘ TRÊN ẢNH ĐÃ CẮT ---
+    # --- BƯỚC 1: CLICK 4 ĐIỂM ---
     if len(st.session_state.diem_click) < 4:
-        st.subheader("📍 Ảnh đã được bẻ phẳng. Hãy click chọn 4 điểm!")
+        st.subheader("📍 BƯỚC 1: Click chọn 4 điểm")
         st.write("Chỉ bao quanh đúng 4 cột A, B, C, D của 2 vùng.")
         
         value = streamlit_image_coordinates(img_pil_xuly, key=f"clicker_{len(st.session_state.diem_click)}")
@@ -101,7 +110,7 @@ if uploaded_file:
         st.image(img_hien_thi, channels="BGR", use_container_width=True)
         st.warning(f"Đang ghi nhận... {len(st.session_state.diem_click)}/4 điểm.")
 
-    # --- BƯỚC 2: CHIA LƯỚI & KHỬ NHIỄU ---
+    # --- BƯỚC 2: CHIA LƯỚI & CHẤM ĐIỂM ---
     else:
         p1, p2, p3, p4 = st.session_state.diem_click
         
@@ -162,7 +171,7 @@ if uploaded_file:
         # --- HIỂN THỊ KẾT QUẢ ---
         col_img, col_res = st.columns([1, 1])
         with col_img:
-            st.success("✅ Đã xử lý bẻ phẳng & quét lõi mực (Ô vàng)!")
+            st.success("✅ Đã cắt chuẩn và quét lõi mực thành công!")
             st.image(img_hien_thi, channels="BGR", use_container_width=True)
             
         with col_res:
