@@ -4,47 +4,89 @@ import streamlit as st
 from PIL import Image
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-st.set_page_config(page_title="VDC - HEPC Scanner V0.13", layout="wide")
-st.title("🚀 HEPC Click-Scanner V0.13")
-st.write("Giảng viên: **Trần Công Đẹp** | Tính năng: Chia lưới chuẩn 4 cột A-B-C-D")
+st.set_page_config(page_title="VDC - HEPC Scanner V0.15", layout="wide")
+st.title("🚀 HEPC Click-Scanner V0.15")
+st.write("Giảng viên: **Trần Công Đẹp** | Tính năng: Tự động bẻ phẳng giấy & Khử nhiễu ánh sáng")
 
-# --- KHỞI TẠO LƯU TRỮ TỌA ĐỘ ---
+# --- HÀM HỖ TRỢ BẺ PHẲNG ---
+def order_points(pts):
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmin(s)]
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    return rect
+
+def four_point_transform(image, pts):
+    rect = order_points(pts)
+    (tl, tr, br, bl) = rect
+    widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+    widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+    maxWidth = max(int(widthA), int(widthB))
+    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+    heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+    maxHeight = max(int(heightA), int(heightB))
+    dst = np.array([[0, 0], [maxWidth - 1, 0], [maxWidth - 1, maxHeight - 1], [0, maxHeight - 1]], dtype="float32")
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    return warped
+
+# --- KHỞI TẠO LƯU TRỮ ---
 if "diem_click" not in st.session_state:
     st.session_state.diem_click = []
 
-# --- CẤU HÌNH ---
 st.sidebar.header("⚙️ CẤU HÌNH ĐÁP ÁN")
 input_dap_an = st.sidebar.text_area("Nhập dãy đáp án chuẩn:", value="ABCD")
 DAP_AN_LIST = list(input_dap_an.upper().replace(" ", ""))
+
+nguong_muc = st.sidebar.slider("Độ nhạy nét mực (Càng nhỏ càng dễ nhận)", 10, 100, 30)
 
 if st.sidebar.button("🔄 Xóa tọa độ (Làm mới lưới)"):
     st.session_state.diem_click = []
     st.rerun()
 
-st.sidebar.markdown("---")
-st.sidebar.info("💡 Hướng dẫn: Click 4 điểm bao quanh CHỈ CÁC CỘT ĐÁP ÁN (A, B, C, D), không bao gồm cột Số Thứ Tự.")
-
 uploaded_file = st.sidebar.file_uploader("Tải phiếu làm bài lên...", type=["jpg", "png", "jpeg"])
 
 if uploaded_file:
+    # Đọc ảnh gốc
     img_pil = Image.open(uploaded_file).convert("RGB")
     img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-    img_hien_thi = img_cv.copy()
     
-    # --- BƯỚC 1: LẤY 4 ĐIỂM TỌA ĐỘ ---
+    # --- BƯỚC 0: TỰ ĐỘNG CẮT BỎ NỀN THỪA ---
+    gray_full = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray_full, (5, 5), 0)
+    edged = cv2.Canny(blurred, 50, 150)
+    
+    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    
+    paper_contour = None
+    for c in contours:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4:
+            paper_contour = approx
+            break
+            
+    if paper_contour is not None:
+        img_xuly = four_point_transform(img_cv, paper_contour.reshape(4, 2))
+        st.toast("✂️ Đã tự động cắt gọt lề thừa và bẻ phẳng tờ giấy!", icon="✅")
+    else:
+        img_xuly = img_cv.copy()
+        st.toast("⚠️ Không tìm thấy viền giấy, hệ thống đang dùng ảnh gốc.", icon="⚠️")
+
+    # Dùng ảnh đã cắt làm ảnh chính để xử lý
+    img_hien_thi = img_xuly.copy()
+    img_pil_xuly = Image.fromarray(cv2.cvtColor(img_xuly, cv2.COLOR_BGR2RGB))
+    
+    # --- BƯỚC 1: LẤY 4 ĐIỂM TỌA ĐỘ TRÊN ẢNH ĐÃ CẮT ---
     if len(st.session_state.diem_click) < 4:
-        st.subheader("📍 CHẾ ĐỘ THIẾT LẬP LƯỚI: Click chọn 4 điểm")
-        st.markdown("""
-        **VÙNG 1 (Câu 1-20):**
-        1️⃣ Góc TRÊN-TRÁI (Sát ô A câu 1)
-        2️⃣ Góc DƯỚI-PHẢI (Sát ô D câu 20)
+        st.subheader("📍 Ảnh đã được bẻ phẳng. Hãy click chọn 4 điểm!")
+        st.write("Chỉ bao quanh đúng 4 cột A, B, C, D của 2 vùng.")
         
-        **VÙNG 2 (Câu 21-40):**
-        3️⃣ Góc TRÊN-TRÁI (Sát ô A câu 21)
-        4️⃣ Góc DƯỚI-PHẢI (Sát ô D câu 40)
-        """)
-        
-        value = streamlit_image_coordinates(img_pil, key=f"clicker_{len(st.session_state.diem_click)}")
+        value = streamlit_image_coordinates(img_pil_xuly, key=f"clicker_{len(st.session_state.diem_click)}")
         
         if value is not None:
             toa_do = (value["x"], value["y"])
@@ -57,9 +99,9 @@ if uploaded_file:
             cv2.putText(img_hien_thi, str(idx+1), (pt[0]+10, pt[1]-10), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 3)
 
         st.image(img_hien_thi, channels="BGR", use_container_width=True)
-        st.warning(f"⏳ Đang ghi nhận... Đã chọn {len(st.session_state.diem_click)}/4 điểm.")
+        st.warning(f"Đang ghi nhận... {len(st.session_state.diem_click)}/4 điểm.")
 
-    # --- BƯỚC 2: CHIA LƯỚI CHUẨN 4 CỘT ---
+    # --- BƯỚC 2: CHIA LƯỚI & KHỬ NHIỄU ---
     else:
         p1, p2, p3, p4 = st.session_state.diem_click
         
@@ -73,11 +115,11 @@ if uploaded_file:
         v2_w = v2_x_max - v2_x_min
         v2_h = v2_y_max - v2_y_min
         
-        cv2.rectangle(img_hien_thi, (v1_x_min, v1_y_min), (v1_x_max, v1_y_max), (0, 255, 0), 3)
-        cv2.rectangle(img_hien_thi, (v2_x_min, v2_y_min), (v2_x_max, v2_y_max), (0, 255, 0), 3)
+        cv2.rectangle(img_hien_thi, (v1_x_min, v1_y_min), (v1_x_max, v1_y_max), (0, 255, 0), 2)
+        cv2.rectangle(img_hien_thi, (v2_x_min, v2_y_min), (v2_x_max, v2_y_max), (0, 255, 0), 2)
 
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY_INV)
+        gray = cv2.cvtColor(img_xuly, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 10)
         
         ket_qua = []
         labels = ["A", "B", "C", "D"]
@@ -89,12 +131,13 @@ if uploaded_file:
         
         for vung in danh_sach_vung:
             chieu_cao_1_cau = vung['h'] / 20
-            # SỬA LỖI TẠI ĐÂY: Chia chính xác làm 4 cột thay vì 5
             chieu_rong_1_o = vung['w'] / 4 
+            
+            margin_x = int(chieu_rong_1_o * 0.20)
+            margin_y = int(chieu_cao_1_cau * 0.20)
             
             for dong in range(20):
                 muc_trong_4_o = []
-                # SỬA LỖI TẠI ĐÂY: Quét từ cột 0 đến 3 (tương đương 4 cột)
                 for cot_abcd in range(4): 
                     x1 = int(vung['x'] + cot_abcd * chieu_rong_1_o)
                     y1 = int(vung['y'] + dong * chieu_cao_1_cau)
@@ -103,16 +146,23 @@ if uploaded_file:
                     
                     cv2.rectangle(img_hien_thi, (x1, y1), (x2, y2), (255, 0, 0), 1)
                     
-                    vung_muc = thresh[y1:y2, x1:x2]
+                    loi_x1 = x1 + margin_x
+                    loi_y1 = y1 + margin_y
+                    loi_x2 = x2 - margin_x
+                    loi_y2 = y2 - margin_y
+                    
+                    cv2.rectangle(img_hien_thi, (loi_x1, loi_y1), (loi_x2, loi_y2), (0, 255, 255), 1)
+                    
+                    vung_muc = thresh[loi_y1:loi_y2, loi_x1:loi_x2]
                     muc_trong_4_o.append(cv2.countNonZero(vung_muc))
                 
                 o_nhieu_muc_nhat = np.argmax(muc_trong_4_o)
-                ket_qua.append(labels[o_nhieu_muc_nhat] if muc_trong_4_o[o_nhieu_muc_nhat] > 30 else "Trống")
+                ket_qua.append(labels[o_nhieu_muc_nhat] if muc_trong_4_o[o_nhieu_muc_nhat] > nguong_muc else "Trống")
         
         # --- HIỂN THỊ KẾT QUẢ ---
         col_img, col_res = st.columns([1, 1])
         with col_img:
-            st.success("✅ Đã chia 4 cột chính xác!")
+            st.success("✅ Đã xử lý bẻ phẳng & quét lõi mực (Ô vàng)!")
             st.image(img_hien_thi, channels="BGR", use_container_width=True)
             
         with col_res:
